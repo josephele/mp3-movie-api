@@ -1,58 +1,96 @@
 import logging
+import sqlite3
+import pandas as pd 
+
+from .database import get_connection, initialize_database
 
 logger = logging.getLogger(__name__)
 
-class DatasetStorage:
-    def __init__(self):
-        self._store = {}
-        self._counter = 0
+MOVIE_COLUMNS = ["title", "release_year", "rating","genre"]
+                 
 
-    def save(self, df, filename):
-        """Store a copy of the data and return a new integer ID."""
-        self._counter += 1
-        dataset_id = self._counter
+class MovieStorage:
+    def __init__(self, db_path="data/movies.db"):
+        self.db_path = db_path
+        initialize_database(self.db_path)
 
-        self._store[dataset_id] = {"filename": filename, "data": df.copy()}
+    def save(self, df):
+        """Replace all movie rows in one transaction."""
+        df = df.astype(object).where(pd.notnull(df), None)
+        rows = list(df[MOVIE_COLUMNS].itertuples(index=False, name=None))
+        connection = get_connection(self.db_path)
+        try:
+            sql_statement = "DELETE FROM movies"
+            connection.execute(sql_statement)
+            sql_statement = '''INSERT INTO movies (title, release_year, rating, genre)VALUES(?, ?, ?, ?)'''
+            connection.executemany(sql_statement, rows)
+            connection.commit()
+            logger.debug(f"Saved movie count: rows = {len(rows)}")
+        except sqlite3.Error:
+            connection.rollback()
+            raise
+        finally: 
+            connection.close()
 
-        logger.debug(f"Stored dataset: id = {dataset_id}, row = {len(df)}")
 
-        return dataset_id
-    
-    def get(self, dataset_id):
-        """Return a copy of the stored DataFrame, or None."""
-        item = self._store.get(dataset_id)
-        if item is None: 
-            logger.debug(f"dataset missing: id={dataset_id}") 
-            return None
-        logger.debug(f"got dataset: id={dataset_id}")
-        return item["data"].copy()
-    def get_metadata(self, dataset_id):
-        """Return the dataset metadata, or None."""
-        item = self._store.get(dataset_id)
-        if item is None:
-            logger.debug(f"Dataset not found: id={dataset_id}")
-            return None
-        df = item["data"]
-        logger.debug(f"Retrieved metadata: id={dataset_id}")
-        return {
-            "id": dataset_id,
-            "filename": item["filename"],
-            "rows": len(df),
-            "columns": len(df.columns),
-            "column_names": list(df.columns),
-        }
-        
-    def update(self, dataset_id, df):
-        """Replace an existing dataset; return True, or False if missing."""
-        item = self._store.get(dataset_id)
-        if item is None:
-            logger.debug(f"Dataset not found: id={dataset_id}")
-            return False
-        item["data"] = df.copy()
-        logger.debug(f"Updated dataset: id={dataset_id}, rows={len(df)}")
-        return True
-    
-    def clear(self):
-        """Clear all data and reset the ID counter."""
-        self._store.clear()
-        self._counter = 0
+    def get(self):
+        """Return the four movie columns as a DataFrame, ordered by id."""
+        connection = get_connection(self.db_path)
+        try:
+            sql_statement = """
+            SELECT title, release_year, rating, genre FROM movies
+            ORDER BY id"""
+            rows = connection.execute(sql_statement).fetchall()
+            return pd.DataFrame(rows, columns= MOVIE_COLUMNS)
+        finally: 
+            connection.close()
+
+    def select_columns(self, columns, limit=5):
+        """Return id plus the requested movie columns, ordered by id."""
+        if not columns:
+            logger.error("Select at least one column")
+            raise ValueError("Select at least one column")
+        for column in columns:
+            if column not in MOVIE_COLUMNS:
+                logger.error(f"Unsupported column: {column}")
+                raise ValueError(f"Unsupported column: {column}")
+        selected_columns = ", ".join(["id"] + columns)
+        connection = get_connection(self.db_path)
+        try:
+            sql_statement = f"SELECT {selected_columns} FROM movies ORDER BY id LIMIT ?"
+            rows = connection.execute(sql_statement, (limit,)).fetchall()
+            movies = [dict(row) for row in rows]
+            logger.debug(f"returned {len(movies)} movie records""")
+            return movies
+        finally:
+            connection.close()
+             
+    def count_movies(self):
+        """Return the number of stored movies using SQL COUNT(*)."""
+        connection = get_connection(self.db_path)
+        try:
+            sql_statement = "SELECT COUNT(*) AS numMovie FROM movies"
+            row = connection.execute(sql_statement).fetchone()
+            return row["numMovie"]
+        finally:
+            connection.close()
+    def query_movies(self, columns, min_rating, limit):
+        """Return selected fields from matching movies using SQL."""
+        if not columns:
+            logger.error("No column selected")
+            raise ValueError
+        for column in columns:
+            if column not in MOVIE_COLUMNS: 
+                logger.error(f"column not found: { column}")
+                raise ValueError
+        selected_columns = ", ".join(["id"] + columns)
+        connection = get_connection(self.db_path)
+        try: 
+            sql_statement = f""" SELECT {selected_columns} FROM movies WHERE rating >= ? ORDER BY rating DESC, id ASC LIMIT ?"""
+            rows = connection.execute(sql_statement, (min_rating, limit)).fetchall()
+            movies = [dict(row) for row in rows]
+            logger.debug(f"number of movies: columns = {columns}, rows={len(movies)}")
+            return movies 
+        finally: 
+            connection.close()
+
