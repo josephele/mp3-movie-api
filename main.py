@@ -13,8 +13,9 @@ from src.middleware import log_requests
 setup_logging(verbose=True)
 logger = logging.getLogger(__name__)
 
-rom src import (MovieStorage,MovieUploadInfo,MovieDataResponse MovieProcessingReport,)
-from src.storage import MOVIE_COLUMN
+from src import (MovieStorage,MovieUploadInfo,MovieDataResponse, MovieProcessingReport,MovieCache)
+from src.storage import MOVIE_COLUMNS
+cache = MovieCache()
 
 app = FastAPI(title="Data Processing API", version="1.0.0")
 storage = MovieStorage()
@@ -46,6 +47,7 @@ async def upload_movies(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail = "no data rows")
     df = df[MOVIE_COLUMNS]
     storage.save(df)
+    cache.invalidate()
     logger.info(f"Uploaded movies filename={file.filename}, rows={len(df)}")
     return {"filename": file.filename,
         "rows": len(df),
@@ -57,14 +59,19 @@ async def upload_movies(file: UploadFile = File(...)):
 @app.get("/movies",response_model=MovieDataResponse)
 def get_movies(limit: int = Query(default=100, ge=1)):
     """Return up to limit stored movies."""
+    cached = cache.get(limit)
+    if cached is not None:
+        logger.info(f"Returned movies from catche")
+        return cached
     total_rows = storage.count_movies()
     if total_rows == 0:
-        logger.info("Returned 0 movies")
-        return {"data": [], "total_rows": 0}
-
-    records = storage.select_columns(MOVIE_COLUMNS, limit)
+        records =[]
+    else:
+        records = storage.select_columns(MOVIE_COLUMNS, limit)
+    response = {"data": records,"total_rows":total_rows}
+    cache.set(limit, response)
     logger.info(f"Returned {len(records)} movies")
-    return {"data": records, "total_rows": total_rows}
+    return response
 
 
 @app.get("/movies/search", response_model=list[dict])
@@ -117,6 +124,7 @@ def process_movies(config: ProcessConfig):
         logger.warning(f"failed:{error}")
         raise HTTPException(status_code=400, detail=str(error))
     storage.save(processed)
+    cache.invalidate()
     logger.info(f"Processed  movies: validation_removed={validation_rows_removed}")
     return{
         "validation_rows_removed": validation_rows_removed,
@@ -125,3 +133,5 @@ def process_movies(config: ProcessConfig):
 
 #python -m uvicorn main:app --reload
 #http://127.0.0.1:8000/docs
+
+#restart control+C

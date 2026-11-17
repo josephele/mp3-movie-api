@@ -6,12 +6,6 @@ from fastapi.testclient import TestClient
 from main import app, storage
 
 
-@pytest.fixture
-def client():
-    storage.clear()
-    with TestClient(app) as test_client:
-        yield test_client
-    storage.clear()
 
 
 @pytest.fixture
